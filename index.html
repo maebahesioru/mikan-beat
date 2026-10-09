@@ -1,0 +1,314 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mikan Beat</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #120f1c; overflow: hidden; font-family: system-ui, "Hiragino Sans", sans-serif; }
+  .wrap { position: relative; height: 100%; display: flex; align-items: center; justify-content: center; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<div class="wrap"><canvas id="game" width="720" height="760"></canvas></div>
+<script>
+/* Mikan Beat — a 4-lane rhythm game with procedural chiptune.
+   Keys: D F J K. Mikan dances while you play. */
+
+const cv = document.getElementById('game');
+const X = cv.getContext('2d');
+const W = cv.width, H = cv.height;
+
+const BPM = 132, BEAT = 60 / BPM, LANES = 4;
+const LANE_KEYS = ['d', 'f', 'j', 'k'];
+const LANE_COLORS = ['#f7a354', '#f28c9c', '#c07cf2', '#5cc8f2'];
+
+// ---------- chart ----------
+// 8 bars intro (no notes), then 24 bars of notes, then 4 bars outro.
+// pattern = per bar, list of [lane, beatOffset] on a grid of 8ths.
+const PATTERNS = [
+  [[0, 0], [2, 0], [1, 1], [3, 1], [0, 2], [1, 2], [3, 2], [2, 3], [0, 3], [3, 3]],
+  [[0, 0], [3, 0], [1, 0.5], [2, 0.5], [0, 1], [3, 1], [1, 1.5], [2, 1.5], [0, 2], [3, 2], [1, 3], [2, 3]],
+  [[0, 0], [1, 1], [2, 2], [3, 3], [0, 0.5], [1, 1.5], [2, 2.5], [3, 3.5]],
+  [[3, 0], [2, 0], [1, 0.5], [0, 0.5], [3, 1], [2, 1], [1, 1.5], [0, 1.5], [3, 2], [0, 2.5], [1, 3], [2, 3]],
+];
+const INTRO_BARS = 4, PLAY_BARS = 14, OUTRO_BARS = 2;
+const TOTAL_BARS = INTRO_BARS + PLAY_BARS + OUTRO_BARS;
+const NOTES = [];
+for (let bar = INTRO_BARS; bar < INTRO_BARS + PLAY_BARS; bar++) {
+  const pat = PATTERNS[(bar - INTRO_BARS) % PATTERNS.length];
+  const bar8 = (bar - INTRO_BARS) * 4;
+  for (const [lane, off] of pat) {
+    NOTES.push({ lane, t: (bar8 + off) * BEAT, hit: null });
+  }
+}
+const SONG_LEN = TOTAL_BARS * 4 * BEAT;
+
+// ---------- audio engine ----------
+let AC = null, master = null, noiseBuf = null;
+function initAudio() {
+  AC = new (window.AudioContext || window.webkitAudioContext)();
+  master = AC.createGain(); master.gain.value = 0.32; master.connect(AC.destination);
+  noiseBuf = AC.createBuffer(1, AC.sampleRate * 0.5, AC.sampleRate);
+  const d = noiseBuf.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+}
+function inst(kind, freq, t, dur, vol) {
+  const o = AC.createOscillator(), g = AC.createGain();
+  o.type = kind; o.frequency.setValueAtTime(freq, t);
+  g.gain.setValueAtTime(vol, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g); g.connect(master);
+  o.start(t); o.stop(t + dur + 0.02);
+}
+function kick(t) {
+  const o = AC.createOscillator(), g = AC.createGain();
+  o.type = 'sine'; o.frequency.setValueAtTime(160, t);
+  o.frequency.exponentialRampToValueAtTime(45, t + 0.12);
+  g.gain.setValueAtTime(0.9, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.14);
+  o.connect(g); g.connect(master); o.start(t); o.stop(t + 0.16);
+}
+function snare(t) {
+  const s = AC.createBufferSource(); s.buffer = noiseBuf;
+  const g = AC.createGain(); const f = AC.createBiquadFilter();
+  f.type = 'highpass'; f.frequency.value = 1400;
+  g.gain.setValueAtTime(0.5, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
+  s.connect(f); f.connect(g); g.connect(master); s.start(t); s.stop(t + 0.14);
+}
+function hat(t, v) {
+  const s = AC.createBufferSource(); s.buffer = noiseBuf;
+  const g = AC.createGain(); const f = AC.createBiquadFilter();
+  f.type = 'highpass'; f.frequency.value = 7000;
+  g.gain.setValueAtTime(v, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.04);
+  s.connect(f); f.connect(g); g.connect(master); s.start(t); s.stop(t + 0.06);
+}
+const SCALE = [261.63, 293.66, 329.63, 392.0, 440.0, 523.25]; // C D E G A C
+function scheduleBar(bar, t0) {
+  const bt = t0 + bar * 4 * BEAT;
+  for (let b = 0; b < 4; b++) {
+    const t = bt + b * BEAT;
+    kick(t);
+    hat(t + BEAT / 2, 0.25);
+    if (b % 2 === 1) snare(t);
+    // bass
+    const bassNote = [55, 65.4, 73.4, 49][bar % 4];
+    inst('square', bassNote, t, BEAT * 0.9, 0.28);
+  }
+  // simple lead melody on some bars
+  if (bar >= 2) {
+    for (let b = 0; b < 8; b++) {
+      if ((bar * 3 + b * 5) % 4 === 0) {
+        const n = SCALE[(bar * 7 + b * 3) % SCALE.length];
+        inst('triangle', n * 2, bt + b * (BEAT / 2), BEAT * 0.4, 0.12);
+      }
+    }
+  }
+}
+
+// ---------- game state ----------
+let state = 'start'; // start | play | done
+let songStart = 0, songTime = 0;
+let score = 0, combo = 0, maxCombo = 0, hits = 0, misses = 0;
+let fx = [], dancy = 0, sadFace = 0;
+let laneFlash = [0, 0, 0, 0];
+let scheduledBars = 0;
+
+function reset() {
+  score = 0; combo = 0; maxCombo = 0; hits = 0; misses = 0;
+  fx = []; dancy = 0; sadFace = 0; laneFlash = [0, 0, 0, 0];
+  for (const n of NOTES) { n.hit = null; n.judged = false; }
+}
+function start() {
+  if (!AC) initAudio();
+  AC.resume();
+  reset();
+  state = 'play';
+  scheduledBars = 0;
+  songStart = AC.currentTime + 0.25;
+  songTime = 0;
+}
+function judge(delta) {
+  const ad = Math.abs(delta);
+  if (ad < 0.09) return ['PERFECT', 300];
+  if (ad < 0.16) return ['GREAT', 200];
+  if (ad < 0.24) return ['OK', 100];
+  return null;
+}
+function press(lane) {
+  if (state !== 'play') return;
+  laneFlash[lane] = 12;
+  // closest unjudged note in this lane within window
+  let best = null, bestD = 1e9;
+  for (const n of NOTES) {
+    if (n.lane !== lane || n.hit !== null) continue;
+    const d = n.t - songTime;
+    if (Math.abs(d) < 0.24 && Math.abs(d) < Math.abs(bestD)) { best = n; bestD = d; }
+  }
+  if (best) {
+    const j = judge(bestD);
+    if (j) {
+      best.hit = j[0];
+      score += j[1] + Math.min(combo, 50) * 2;
+      combo++; maxCombo = Math.max(maxCombo, combo);
+      hits++; dancy = 20;
+      fx.push({ x: 0, y: 0, lane, t: 1, label: j[0] });
+      inst('triangle', 880, AC.currentTime, 0.08, 0.15);
+      return;
+    }
+  }
+  // dead press
+  combo = 0; sadFace = 30;
+  inst('sawtooth', 120, AC.currentTime, 0.1, 0.1);
+}
+
+// ---------- input ----------
+addEventListener('keydown', e => {
+  const k = e.key.toLowerCase();
+  if (state === 'start' || state === 'done') {
+    if (k === ' ' || k === 'enter') start();
+    return;
+  }
+  const li = LANE_KEYS.indexOf(k);
+  if (li >= 0 && !e.repeat) press(li);
+});
+cv.addEventListener('click', () => { if (state !== 'play') start(); });
+
+// ---------- update/draw ----------
+function update(dt) {
+  if (state !== 'play') return;
+  songTime = AC.currentTime - songStart;
+  // schedule music bars ahead
+  while (scheduledBars < TOTAL_BARS && songStart + scheduledBars * 4 * BEAT < AC.currentTime + 0.4) {
+    scheduleBar(scheduledBars, songStart);
+    scheduledBars++;
+  }
+  // auto-miss
+  for (const n of NOTES) {
+    if (n.hit === null && !n.judged && n.t < songTime - 0.24) {
+      n.judged = true; n.hit = 'MISS'; combo = 0; misses++; sadFace = 30;
+    }
+  }
+  if (dancy > 0) dancy--;
+  if (sadFace > 0) sadFace--;
+  for (let i = 0; i < 4; i++) if (laneFlash[i] > 0) laneFlash[i]--;
+  fx = fx.filter(f => f.t > 0);
+  for (const f of fx) f.t -= dt * 2;
+  if (songTime > SONG_LEN + 0.6) state = 'done';
+}
+const LANE_W = 90, HIT_Y = H - 120;
+function noteY(t) {
+  const lead = 1.35; // seconds visible
+  return HIT_Y - (t - songTime) / lead * (HIT_Y - 60);
+}
+function draw() {
+  X.fillStyle = '#120f1c'; X.fillRect(0, 0, W, H);
+  // lane bg
+  const x0 = (W - LANE_W * LANES) / 2;
+  for (let i = 0; i < LANES; i++) {
+    X.fillStyle = i % 2 ? '#232038' : '#1e1b30';
+    X.fillRect(x0 + i * LANE_W, 40, LANE_W, H - 120);
+    if (laneFlash[i] > 0) {
+      X.fillStyle = LANE_COLORS[i] + '33';
+      X.fillRect(x0 + i * LANE_W, 40, LANE_W, H - 120);
+    }
+    X.fillStyle = LANE_COLORS[i];
+    X.fillRect(x0 + i * LANE_W + 10, H - 70, LANE_W - 20, 8);
+    X.globalAlpha = 0.25; X.fillRect(x0 + i * LANE_W + 1, 40, LANE_W - 2, H - 120); X.globalAlpha = 1;
+    X.fillStyle = '#8b93a8'; X.font = '700 18px system-ui';
+    X.textAlign = 'center';
+    X.fillText(LANE_KEYS[i].toUpperCase(), x0 + i * LANE_W + LANE_W / 2, H - 30);
+    X.textAlign = 'left';
+  }
+  // hit line
+  X.fillStyle = '#3a3352';
+  X.fillRect(x0, HIT_Y - 2, LANE_W * LANES, 4);
+  // notes
+  for (const n of NOTES) {
+    if (n.hit !== null) continue;
+    const y = noteY(n.t);
+    if (y < 30 || y > H) continue;
+    const nx = x0 + n.lane * LANE_W + 12;
+    X.fillStyle = LANE_COLORS[n.lane];
+    X.beginPath();
+    X.roundRect(nx, y - 10, LANE_W - 24, 20, 9);
+    X.fill();
+  }
+  // fx labels
+  for (const f of fx) {
+    X.globalAlpha = Math.max(0, f.t);
+    X.fillStyle = f.label === 'PERFECT' ? '#f7c948' : '#eae6f2';
+    X.font = '800 20px system-ui';
+    X.textAlign = 'center';
+    X.fillText(f.label, x0 + f.lane * LANE_W + LANE_W / 2, HIT_Y + 40 + (1 - f.t) * 20);
+    X.textAlign = 'left';
+    X.globalAlpha = 1;
+  }
+  // mikan dancer (top-right)
+  drawMikanDancer(W - 110, 120, dancy > 0, sadFace > 0);
+  // HUD
+  X.fillStyle = '#eae6f2'; X.font = '800 26px system-ui';
+  X.fillText(String(score), 20, 40);
+  if (combo > 1) {
+    X.fillStyle = '#f7c948'; X.font = '800 20px system-ui';
+    X.fillText(combo + 'x', 20, 70);
+  }
+  // progress
+  const pr = Math.max(0, Math.min(1, songTime / SONG_LEN));
+  X.fillStyle = '#2e2940'; X.fillRect(20, 86, W - 40, 6);
+  X.fillStyle = '#f7a354'; X.fillRect(20, 86, (W - 40) * pr, 6);
+
+  if (state === 'start') overlay("Mikan Beat", "A tiny rhythm game. Hit the notes when they reach the line!", "D  F  J  K   ·   press SPACE to start");
+  if (state === 'done') {
+    const acc = hits + misses > 0 ? Math.round(hits / (hits + misses) * 100) : 0;
+    overlay("Song complete!", `score ${score} · max combo ${maxCombo}x · accuracy ${acc}%`, "press SPACE to play again");
+  }
+}
+function overlay(title, sub, hint) {
+  X.fillStyle = 'rgba(10,8,18,.58)'; X.fillRect(0, 0, W, H);
+  X.fillStyle = 'rgba(24,20,36,.92)';
+  X.beginPath(); X.roundRect(W / 2 - 280, H / 2 - 110, 560, 230, 20); X.fill();
+  X.strokeStyle = '#42395e'; X.lineWidth = 2; X.stroke();
+  X.textAlign = 'center';
+  X.fillStyle = '#f7a354'; X.font = '800 44px system-ui';
+  X.fillText(title, W / 2, H / 2 - 50);
+  X.fillStyle = '#eae6f2'; X.font = '17px system-ui';
+  X.fillText(sub, W / 2, H / 2 + 6);
+  X.fillStyle = '#8b93a8'; X.font = '15px system-ui';
+  X.fillText(hint, W / 2, H / 2 + 54);
+  X.textAlign = 'left';
+}
+function drawMikanDancer(cx, cy, dance, sad) {
+  X.save(); X.translate(cx, cy + (dance ? -6 : 0));
+  const O = '#f7a354', C = '#ffe7c4', K = '#3d2b26', P = '#f7a8a8';
+  const R = (x, y, w, h, col) => { X.fillStyle = col; X.fillRect(x, y, w, h); };
+  // body bob
+  R(-20, 6, 40, 34, O);
+  R(-23, -22, 46, 34, O);
+  R(-28, -30, 13, 11, O); R(15, -30, 13, 11, O);
+  R(-24, -27, 7, 7, P); R(17, -27, 7, 7, P);
+  if (sad) {
+    R(-14, -10, 9, 3, K); R(5, -10, 9, 3, K); // closed sad eyes
+  } else {
+    R(-14, -12, 9, 7, K); R(5, -12, 9, 7, K);
+  }
+  R(-3, -3, 6, 4, P);
+  R(-9, 3, 18, 8, C);
+  // arms up when dancing
+  if (dance) {
+    R(-30, -6, 10, 8, O); R(20, -6, 10, 8, O);
+    R(-34, -16, 8, 8, O); R(26, -16, 8, 8, O);
+  }
+  X.restore();
+}
+
+// ---------- loop ----------
+let last = performance.now();
+(function loop(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  update(dt); draw();
+  requestAnimationFrame(loop);
+})(performance.now());
+</script>
+</body>
+</html>
