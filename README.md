@@ -31,3 +31,20 @@ Just open `index.html`, or:
 ```bash
 python3 -m http.server 3844
 ```
+
+## AI usage (disclosed)
+
+Crescent's guide asks for honesty about AI, so here it is plainly:
+
+- **Most of the code in this project was written with an AI coding assistant**,
+  working from a short brief: a 4-lane rhythm game, a fully procedural chiptune
+  soundtrack (no audio files), and the mikan cat from the rest of the Mikan
+  series. The build was iterated across several sessions with play-testing
+  in between.
+- **No tutorial was followed.** The AudioContext lookahead scheduler and the
+  chart format are custom and documented above.
+- The tracked Hackatime hours are the real build sessions. Hack Club policy
+  deflates time that comes from AI tooling — that's understood and fine.
+- If you're reviewing this: it's a small, honest game. Happy to make any
+  changes you ask for.
+
